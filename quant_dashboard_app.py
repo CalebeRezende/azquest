@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -9,10 +7,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ======================================================
-#  Garantir yfinance instalado mesmo se o host ignorar
-#  o requirements.txt (útil em alguns ambientes)
-# ======================================================
+# Tenta importar yfinance; se não tiver, instala na hora
 try:
     import yfinance as yf
 except ModuleNotFoundError:
@@ -24,28 +19,23 @@ except ModuleNotFoundError:
 TRADING_DAYS = 252
 
 # ======================================================
-#  UNIVERSO DE INVESTIMENTOS PRÉ-DEFINIDOS
-#  (inclui B3 + EUA, default em EUA p/ evitar erro na nuvem)
+#  UNIVERSO DE INVESTIMENTOS (tipo "lista de produtos")
 # ======================================================
 
 INVESTMENT_UNIVERSE: Dict[str, str] = {
-    # B3
+    # Brasil
     "PETR4 (Petrobras PN)": "PETR4.SA",
     "VALE3 (Vale ON)": "VALE3.SA",
     "ITUB4 (Itaú Unibanco PN)": "ITUB4.SA",
     "BBDC4 (Bradesco PN)": "BBDC4.SA",
     "BBAS3 (Banco do Brasil ON)": "BBAS3.SA",
-    "ABEV3 (Ambev ON)": "ABEV3.SA",
-    "WEGE3 (Weg ON)": "WEGE3.SA",
-    "MGLU3 (Magazine Luiza ON)": "MGLU3.SA",
     "BOVA11 (ETF Ibovespa)": "BOVA11.SA",
     "IVVB11 (ETF S&P 500 B3)": "IVVB11.SA",
-    "^BVSP (Ibovespa índice)": "^BVSP",
-    # EUA
+
+    # EUA (mais “estáveis” no Yahoo)
     "AAPL (Apple)": "AAPL",
     "MSFT (Microsoft)": "MSFT",
     "AMZN (Amazon)": "AMZN",
-    "GOOG (Alphabet)": "GOOG",
     "META (Meta)": "META",
     "NVDA (NVIDIA)": "NVDA",
     "TSLA (Tesla)": "TSLA",
@@ -65,14 +55,6 @@ class AssetStats:
     annual_vol: float
     sharpe: float
     max_drawdown: float
-
-
-@dataclass
-class PortfolioStats:
-    weights: Dict[str, float]
-    annual_return: float
-    annual_vol: float
-    sharpe: float
 
 
 # ==========================
@@ -107,17 +89,13 @@ def _extract_adj_close_for_single_ticker(
             level1 = cols.get_level_values(1)
 
             if "Adj Close" in level0:
-                # pega nível "Adj Close" no primeiro nível
                 s = data["Adj Close"]
                 if isinstance(s, pd.DataFrame):
-                    # se tiver mais de uma coluna, tenta achar este ticker
                     if ticker in s.columns:
                         s = s[ticker]
                     else:
-                        # pega a primeira coluna, pelo menos
                         s = s.iloc[:, 0]
             elif "Adj Close" in level1:
-                # pega por nível=1
                 s = data.xs("Adj Close", axis=1, level=1)
                 if isinstance(s, pd.DataFrame):
                     if ticker in s.columns:
@@ -134,7 +112,6 @@ def _extract_adj_close_for_single_ticker(
                 return None
 
     if isinstance(s, pd.DataFrame):
-        # se por alguma razão sobrou DataFrame, pega a primeira col
         s = s.iloc[:, 0]
 
     s = s.dropna()
@@ -147,9 +124,8 @@ def _extract_adj_close_for_single_ticker(
 def download_prices(tickers: List[str], years: int = 3) -> pd.DataFrame:
     """
     Baixa preços 'Adj Close' via yfinance para 1 ou vários tickers.
-    Baixa CADA TICKER separadamente para:
-    - evitar erros globais quando um deles falha
-    - conseguir ignorar ativos individuais com problema.
+    Faz download de CADA TICKER separadamente, ignora os que falharem
+    e continua com o resto.
     """
     end = datetime.today()
     start = end - timedelta(days=365 * years)
@@ -166,7 +142,7 @@ def download_prices(tickers: List[str], years: int = 3) -> pd.DataFrame:
                 auto_adjust=False,
                 progress=False,
             )
-        except Exception as e:
+        except Exception:
             failed.append(t)
             continue
 
@@ -179,14 +155,14 @@ def download_prices(tickers: List[str], years: int = 3) -> pd.DataFrame:
 
     if failed:
         st.warning(
-            f"Não foi possível obter dados para: {', '.join(failed)}. "
-            "Esses ativos serão ignorados na análise."
+            "Não foi possível obter dados para: "
+            + ", ".join(failed)
+            + ". Esses ativos foram ignorados."
         )
 
     if not series_map:
         raise ValueError("Nenhum dado válido encontrado para os tickers informados.")
 
-    # Alinha todas as séries pelo índice de datas
     df = pd.DataFrame(series_map)
     df = df.dropna(how="all")
     if df.empty:
@@ -195,9 +171,14 @@ def download_prices(tickers: List[str], years: int = 3) -> pd.DataFrame:
     return df
 
 
-def compute_returns(prices: pd.DataFrame) -> pd.DataFrame:
+def compute_log_returns(prices: pd.DataFrame) -> pd.DataFrame:
     """Retornos logarítmicos diários."""
     return np.log(prices / prices.shift(1)).dropna()
+
+
+def compute_simple_returns(prices: pd.DataFrame) -> pd.DataFrame:
+    """Retornos simples diários."""
+    return prices.pct_change().dropna()
 
 
 def max_drawdown(returns: pd.Series) -> float:
@@ -225,15 +206,17 @@ def annualized_stats(returns: pd.Series, risk_free: float = 0.0) -> Tuple[float,
 
 
 def compute_asset_stats(prices: pd.DataFrame, risk_free: float = 0.0) -> List[AssetStats]:
-    returns_df = compute_returns(prices)
+    log_returns = compute_log_returns(prices)
+    simple_returns = compute_simple_returns(prices)
+
     stats: List[AssetStats] = []
 
-    for col in returns_df.columns:
-        series = returns_df[col].dropna()
-        ann_ret, ann_vol, sharpe = annualized_stats(series, risk_free)
-        # para drawdown, usa retorno simples aproximado
-        simple_ret = prices[col].pct_change().dropna()
-        mdd = max_drawdown(simple_ret)
+    for col in log_returns.columns:
+        log_series = log_returns[col].dropna()
+        ann_ret, ann_vol, sharpe = annualized_stats(log_series, risk_free)
+
+        simple_series = simple_returns[col].dropna()
+        mdd = max_drawdown(simple_series)
 
         stats.append(
             AssetStats(
@@ -244,47 +227,8 @@ def compute_asset_stats(prices: pd.DataFrame, risk_free: float = 0.0) -> List[As
                 max_drawdown=mdd,
             )
         )
+
     return stats
-
-
-def random_portfolios(
-    returns_df: pd.DataFrame,
-    n_portfolios: int = 2000,
-    risk_free: float = 0.0,
-) -> List[PortfolioStats]:
-    mean_daily = returns_df.mean()
-    cov_matrix = returns_df.cov()
-    tickers = list(returns_df.columns)
-
-    portfolios: List[PortfolioStats] = []
-
-    for _ in range(n_portfolios):
-        weights = np.random.random(len(tickers))
-        weights /= weights.sum()
-
-        port_daily_return = float(np.dot(weights, mean_daily))
-        port_daily_vol = float(
-            math.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
-        )
-
-        ann_return = port_daily_return * TRADING_DAYS
-        ann_vol = port_daily_vol * math.sqrt(TRADING_DAYS)
-
-        if ann_vol == 0:
-            sharpe = 0.0
-        else:
-            sharpe = (ann_return - risk_free) / ann_vol
-
-        portfolios.append(
-            PortfolioStats(
-                weights={t: float(w) for t, w in zip(tickers, weights)},
-                annual_return=float(ann_return),
-                annual_vol=float(ann_vol),
-                sharpe=float(sharpe),
-            )
-        )
-
-    return portfolios
 
 
 def simulate_investment(prices: pd.DataFrame, invested: float) -> pd.DataFrame:
@@ -311,208 +255,239 @@ def simulate_investment(prices: pd.DataFrame, invested: float) -> pd.DataFrame:
 
 def main():
     st.set_page_config(
-        page_title="Mini Dashboard Quantitativo",
+        page_title="Dashboard Quantitativo",
         page_icon="📈",
         layout="wide",
     )
 
-    st.title("📈 Mini Dashboard Quantitativo em Python")
-    st.caption("Escolha uma lista de investimentos, período e valor, e veja qual teria sido melhor.")
-
-    # --------- SIDEBAR: UNIVERSO DE INVESTIMENTOS ----------
-    st.sidebar.header("🎯 Universo de investimentos")
-
-    universe_labels = list(INVESTMENT_UNIVERSE.keys())
-
-    # Default em EUA para evitar problema de B3 em alguns ambientes
-    default_selection = [
-        "AAPL (Apple)",
-        "MSFT (Microsoft)",
-        "SPY (ETF S&P 500)",
-    ]
-
-    selected_labels = st.sidebar.multiselect(
-        "Selecione os ativos para analisar",
-        options=universe_labels,
-        default=[l for l in default_selection if l in universe_labels],
-        help="Você pode escolher vários (ex: 5, 10, 15 ativos) para comparar.",
+    st.title("📈 Dashboard Quantitativo – Estilo Bloomberg")
+    st.caption(
+        "Escolha uma lista de investimentos, período e valor, e compare desempenho, risco e valor final."
     )
 
-    extra_tickers_str = st.sidebar.text_input(
-        "Tickers adicionais (separados por vírgula, opcional)",
-        value="",
-        help="Ex: PETR4.SA, VALE3.SA, AAPL, MSFT, TSLA",
-    )
+    # --------- CONTROLES (BLOCO TIPO TERMINAL) ----------
+    with st.container():
+        col_left, col_mid, col_right = st.columns([3, 2, 2])
 
-    years = st.sidebar.slider(
-        "Anos de histórico",
-        min_value=1,
-        max_value=10,
-        value=3,
-    )
+        with col_left:
+            st.subheader("🎯 Seleção de investimentos")
 
-    risk_free = st.sidebar.number_input(
-        "Taxa livre de risco (ao ano, em %)",
-        value=10.0,
-        step=0.5,
-    ) / 100.0
+            universe_labels = list(INVESTMENT_UNIVERSE.keys())
 
-    selected_tickers = [INVESTMENT_UNIVERSE[label] for label in selected_labels]
+            default_selection = [
+                "AAPL (Apple)",
+                "MSFT (Microsoft)",
+                "SPY (ETF S&P 500)",
+            ]
 
-    extra_tickers = [
-        t.strip()
-        for t in extra_tickers_str.split(",")
-        if t.strip()
-    ]
+            selected_labels = st.multiselect(
+                "Escolha os ativos para analisar",
+                options=universe_labels,
+                default=[l for l in default_selection if l in universe_labels],
+                help="Você pode escolher vários ativos (ex: 5, 10, 15) para comparar.",
+            )
 
-    tickers = selected_tickers + extra_tickers
+        with col_mid:
+            st.subheader("⏳ Período / Risco")
 
-    if len(tickers) == 0:
-        st.warning("Selecione pelo menos 1 ativo na barra lateral ou informe tickers extras.")
+            years = st.slider(
+                "Anos de histórico",
+                min_value=1,
+                max_value=10,
+                value=3,
+            )
+
+            risk_free = st.number_input(
+                "Taxa livre de risco (ao ano, em %)",
+                value=10.0,
+                step=0.5,
+            ) / 100.0
+
+        with col_right:
+            st.subheader("💰 Simulador")
+
+            invested = st.number_input(
+                "Valor investido (R$)",
+                min_value=100.0,
+                value=1000.0,
+                step=100.0,
+            )
+
+            run_button = st.button("🚀 Rodar análise completa")
+
+    if not selected_labels:
+        st.warning("Selecione pelo menos um investimento na lista para começar.")
         return
 
-    # --------- MODO DE ANÁLISE ----------
-    analysis_type = st.radio(
-        "Tipo de análise",
-        options=[
-            "Estatísticas por ativo",
-            "Simulação de portfólio (Monte Carlo)",
-            "Simulador de investimento (quanto rende?)",
-        ],
-        horizontal=True,
+    tickers = [INVESTMENT_UNIVERSE[label] for label in selected_labels]
+
+    if not run_button:
+        st.info("Ajuste os parâmetros acima e clique em **🚀 Rodar análise completa**.")
+        return
+
+    # --------- PROCESSAMENTO DE DADOS ----------
+    try:
+        prices = download_prices(tickers, years=years)
+    except Exception as e:
+        st.error(f"Erro ao baixar dados: {e}")
+        return
+
+    try:
+        stats = compute_asset_stats(prices, risk_free=risk_free)
+        sim_df = simulate_investment(prices, invested)
+        log_returns = compute_log_returns(prices)
+    except Exception as e:
+        st.error(f"Erro ao processar dados: {e}")
+        return
+
+    # ==========================
+    #  BLOCO 1 – MÉTRICAS + TABELA
+    # ==========================
+
+    st.markdown("---")
+    st.subheader("📊 Visão geral dos ativos")
+
+    df_stats = pd.DataFrame(
+        [
+            {
+                "Ticker": s.ticker,
+                "Retorno Anual (%)": s.annual_return * 100,
+                "Vol Anual (%)": s.annual_vol * 100,
+                "Sharpe": s.sharpe,
+                "Max Drawdown (%)": s.max_drawdown * 100,
+            }
+            for s in stats
+        ]
+    ).set_index("Ticker")
+
+    # Painel de destaques tipo “Bloomberg”
+    col_a, col_b, col_c, col_d = st.columns(4)
+
+    # Escolher o melhor/ pior por alguns critérios
+    best_return = df_stats["Retorno Anual (%)"].idxmax()
+    best_sharpe = df_stats["Sharpe"].idxmax()
+    lowest_dd = df_stats["Max Drawdown (%)"].idxmax()  # menos negativo = melhor
+
+    with col_a:
+        st.metric(
+            "Melhor retorno anual",
+            f"{df_stats.loc[best_return, 'Retorno Anual (%)']:.2f}%",
+            help=f"Ticker: {best_return}",
+        )
+    with col_b:
+        st.metric(
+            "Melhor Sharpe",
+            f"{df_stats.loc[best_sharpe, 'Sharpe']:.2f}",
+            help=f"Ticker: {best_sharpe}",
+        )
+    with col_c:
+        st.metric(
+            "Menor drawdown (max)",
+            f"{df_stats.loc[lowest_dd, 'Max Drawdown (%)']:.2f}%",
+            help=f"Ticker: {lowest_dd}",
+        )
+    with col_d:
+        st.metric(
+            "Ativos analisados",
+            f"{len(df_stats)}",
+        )
+
+    st.dataframe(
+        df_stats.style.format({
+            "Retorno Anual (%)": "{:.2f}",
+            "Vol Anual (%)": "{:.2f}",
+            "Sharpe": "{:.2f}",
+            "Max Drawdown (%)": "{:.2f}",
+        }),
+        use_container_width=True,
     )
 
-    # ============= ESTATÍSTICAS POR ATIVO =============
-    if analysis_type == "Estatísticas por ativo":
-        if st.button("🚀 Rodar análise de estatísticas", key="btn_stats"):
-            try:
-                prices = download_prices(tickers, years=years)
-                stats = compute_asset_stats(prices, risk_free=risk_free)
-            except Exception as e:
-                st.error(f"Erro ao baixar dados ou calcular estatísticas: {e}")
-                return
+    # ==========================
+    #  BLOCO 2 – GRÁFICOS EM DOIS LADOS
+    # ==========================
 
-            df_stats = pd.DataFrame(
-                [
-                    {
-                        "Ticker": s.ticker,
-                        "Retorno Anual (%)": s.annual_return * 100,
-                        "Vol Anual (%)": s.annual_vol * 100,
-                        "Sharpe": s.sharpe,
-                        "Max Drawdown (%)": s.max_drawdown * 100,
-                    }
-                    for s in stats
-                ]
-            ).set_index("Ticker")
+    st.markdown("---")
+    st.subheader("📈 Gráficos – Preço, Retorno e Risco")
 
-            st.subheader("📊 Estatísticas por ativo")
-            st.dataframe(df_stats.style.format({
-                "Retorno Anual (%)": "{:.2f}",
-                "Vol Anual (%)": "{:.2f}",
-                "Sharpe": "{:.2f}",
-                "Max Drawdown (%)": "{:.2f}",
-            }))
+    col_left_chart, col_right_chart = st.columns(2)
 
-    # ============= MONTE CARLO DE PORTFÓLIOS ============
-    elif analysis_type == "Simulação de portfólio (Monte Carlo)":
-        n_portfolios = st.slider(
-            "Número de portfólios a simular",
-            min_value=500,
-            max_value=10000,
-            value=3000,
-            step=500,
+    # --------- ESQUERDA: PREÇOS NORMALIZADOS ---------
+    with col_left_chart:
+        st.markdown("**Evolução dos preços (normalizados)**")
+
+        norm_prices = prices / prices.iloc[0] * 100  # base 100
+
+        st.line_chart(
+            norm_prices,
+            height=350,
+        )
+        st.caption("Base 100 = valor inicial. Estilo terminal: fácil comparar trajetórias.")
+
+    # --------- DIREITA: RETORNO ANUAL X RISCO ---------
+    with col_right_chart:
+        st.markdown("**Risco x Retorno (annualizado)**")
+
+        df_risk_return = df_stats[["Retorno Anual (%)", "Vol Anual (%)", "Sharpe"]].copy()
+        df_risk_return_reset = df_risk_return.reset_index(names="Ticker")
+
+        # Scatter tipo Bloomberg: Vol x Retorno
+        import plotly.express as px
+
+        fig_rr = px.scatter(
+            df_risk_return_reset,
+            x="Vol Anual (%)",
+            y="Retorno Anual (%)",
+            size="Sharpe",
+            color="Ticker",
+            hover_data=["Sharpe"],
+            height=350,
+        )
+        fig_rr.update_layout(margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig_rr, use_container_width=True)
+
+    # ==========================
+    #  BLOCO 3 – SIMULADOR DE INVESTIMENTO
+    # ==========================
+
+    st.markdown("---")
+    st.subheader(f"💰 Simulador de investimento – R$ {invested:,.2f}")
+
+    col_sim_left, col_sim_right = st.columns([2, 2])
+
+    with col_sim_left:
+        st.markdown("**Ranking por valor final**")
+        st.dataframe(
+            sim_df.style.format({
+                "Retorno (%)": "{:.2f}",
+                "Valor Final (R$)": "R${:,.2f}",
+            }),
+            use_container_width=True,
         )
 
-        if st.button("🎲 Rodar simulação de portfólios", key="btn_mc"):
-            try:
-                prices = download_prices(tickers, years=years)
-                returns_df = compute_returns(prices)
-                portfolios = random_portfolios(
-                    returns_df,
-                    n_portfolios=n_portfolios,
-                    risk_free=risk_free,
-                )
-            except Exception as e:
-                st.error(f"Erro ao rodar simulação: {e}")
-                return
-
-            portfolios_sorted = sorted(portfolios, key=lambda p: p.sharpe, reverse=True)
-            top_ports = portfolios_sorted[:5]
-
-            df_ports = pd.DataFrame(
-                [
-                    {
-                        "Rank": i + 1,
-                        "Retorno Anual (%)": p.annual_return * 100,
-                        "Vol Anual (%)": p.annual_vol * 100,
-                        "Sharpe": p.sharpe,
-                        "Pesos": ", ".join(
-                            f"{t}:{w*100:.1f}%" for t, w in p.weights.items()
-                        ),
-                    }
-                    for i, p in enumerate(top_ports)
-                ]
-            ).set_index("Rank")
-
-            st.subheader("🏆 Top 5 portfólios por Sharpe")
-            st.dataframe(df_ports.style.format({
-                "Retorno Anual (%)": "{:.2f}",
-                "Vol Anual (%)": "{:.2f}",
-                "Sharpe": "{:.2f}",
-            }))
-
-            df_all = pd.DataFrame(
-                [
-                    {
-                        "Retorno Anual (%)": p.annual_return * 100,
-                        "Vol Anual (%)": p.annual_vol * 100,
-                        "Sharpe": p.sharpe,
-                    }
-                    for p in portfolios
-                ]
-            )
-
-            st.subheader("📈 Distribuição de portfólios simulados (Retorno x Volatilidade)")
-            st.scatter_chart(
-                df_all,
-                x="Vol Anual (%)",
-                y="Retorno Anual (%)",
-            )
-
-    # ============= SIMULADOR DE INVESTIMENTO ============
-    elif analysis_type == "Simulador de investimento (quanto rende?)":
-        invested = st.number_input(
-            "Valor investido (R$)",
-            min_value=100.0,
-            value=1000.0,
-            step=100.0,
+    with col_sim_right:
+        st.markdown("**Gráfico – Valor final por ativo**")
+        sim_plot = sim_df.copy().reset_index(names="Ticker")
+        st.bar_chart(
+            sim_plot,
+            x="Ticker",
+            y="Valor Final (R$)",
+            height=350,
         )
+        st.caption("Mostra quanto o valor inicial teria virado em cada ativo no período.")
 
-        if st.button("💰 Calcular rendimento", key="btn_sim"):
-            try:
-                prices = download_prices(tickers, years=years)
-            except Exception as e:
-                st.error(f"Erro ao baixar preços: {e}")
-                return
+    # ==========================
+    #  BLOCO 4 – CORRELAÇÃO (EXTRA)
+    # ==========================
 
-            try:
-                simulation = simulate_investment(prices, invested)
-            except Exception as e:
-                st.error(f"Erro ao simular investimento: {e}")
-                return
+    st.markdown("---")
+    st.subheader("🔗 Correlação entre ativos (retornos diários)")
 
-            st.subheader("📊 Ranking de rentabilidade (período escolhido)")
-            st.dataframe(
-                simulation.style.format({
-                    "Retorno (%)": "{:.2f}",
-                    "Valor Final (R$)": "R${:,.2f}",
-                })
-            )
-
-            st.subheader("📈 Evolução do valor investido ao longo do tempo")
-            evolutions = prices / prices.iloc[0] * invested
-            st.line_chart(evolutions)
-
+    corr = log_returns.corr()
+    st.dataframe(
+        corr.style.format("{:.2f}"),
+        use_container_width=True,
+    )
+    st.caption("Correlação baseada em retornos logarítmicos diários.")
 
 if __name__ == "__main__":
     main()
