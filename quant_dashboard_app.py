@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import math
@@ -9,7 +8,15 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
-import yfinance as yf
+
+# Garantir que yfinance esteja instalado mesmo se o ambiente ignorar requirements.txt
+try:
+    import yfinance as yf
+except ModuleNotFoundError:
+    import sys
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "yfinance"])
+    import yfinance as yf
 
 TRADING_DAYS = 252
 
@@ -57,7 +64,7 @@ def download_prices(tickers: List[str], years: int = 3) -> pd.DataFrame:
     if data is None or len(data) == 0:
         raise ValueError("Nenhum dado retornado pelo Yahoo Finance.")
 
-    # Series (caso raro)
+    # Caso Series (situação mais rara)
     if isinstance(data, pd.Series):
         if "Adj Close" in data:
             df = data["Adj Close"].to_frame()
@@ -65,10 +72,12 @@ def download_prices(tickers: List[str], years: int = 3) -> pd.DataFrame:
             raise ValueError(f"Nenhum 'Adj Close' retornado para {tickers}.")
     else:
         cols = data.columns
-        # MultiIndex (vários tickers)
+
+        # MultiIndex (mais comum com vários tickers)
         if isinstance(cols, pd.MultiIndex):
             level0 = cols.get_level_values(0)
             level1 = cols.get_level_values(1)
+
             if "Adj Close" in level0:
                 df = data["Adj Close"]
             elif "Adj Close" in level1:
@@ -76,7 +85,7 @@ def download_prices(tickers: List[str], years: int = 3) -> pd.DataFrame:
             else:
                 raise ValueError("MultiIndex sem nível 'Adj Close'.")
         else:
-            # DataFrame simples (1 ticker)
+            # DataFrame simples (1 ticker só)
             if "Adj Close" in cols:
                 df = data["Adj Close"].to_frame()
             else:
@@ -98,6 +107,7 @@ def compute_returns(prices: pd.DataFrame) -> pd.DataFrame:
 
 
 def max_drawdown(returns: pd.Series) -> float:
+    """Máximo drawdown a partir de retornos simples (1 + r)."""
     cumulative = (1 + returns).cumprod()
     running_max = cumulative.cummax()
     drawdown = cumulative / running_max - 1
@@ -105,6 +115,7 @@ def max_drawdown(returns: pd.Series) -> float:
 
 
 def annualized_stats(returns: pd.Series, risk_free: float = 0.0) -> Tuple[float, float, float]:
+    """Retorno anualizado, volatilidade anualizada e Sharpe anualizado."""
     mean_daily = returns.mean()
     std_daily = returns.std()
 
@@ -126,7 +137,10 @@ def compute_asset_stats(prices: pd.DataFrame, risk_free: float = 0.0) -> List[As
     for col in returns_df.columns:
         series = returns_df[col].dropna()
         ann_ret, ann_vol, sharpe = annualized_stats(series, risk_free)
-        mdd = max_drawdown(series)
+        # para drawdown, usa retorno simples aproximado
+        simple_ret = prices[col].pct_change().dropna()
+        mdd = max_drawdown(simple_ret)
+
         stats.append(
             AssetStats(
                 ticker=str(col),
@@ -165,7 +179,7 @@ def random_portfolios(
         if ann_vol == 0:
             sharpe = 0.0
         else:
-            sharpe = (ann_return - risk_free) / ann_vol
+            sharpe = (annual_return - risk_free) / ann_vol
 
         portfolios.append(
             PortfolioStats(
