@@ -9,7 +9,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Garantir que yfinance esteja instalado mesmo se o ambiente ignorar requirements.txt
+# ======================================================
+#  Garantir yfinance instalado mesmo se o host ignorar
+#  o requirements.txt (útil em alguns ambientes)
+# ======================================================
 try:
     import yfinance as yf
 except ModuleNotFoundError:
@@ -19,6 +22,24 @@ except ModuleNotFoundError:
     import yfinance as yf
 
 TRADING_DAYS = 252
+
+# ======================================================
+#  UNIVERSO DE INVESTIMENTOS PRÉ-DEFINIDOS (B3/ETFs)
+# ======================================================
+
+INVESTMENT_UNIVERSE: Dict[str, str] = {
+    "PETR4 (Petrobras PN)": "PETR4.SA",
+    "VALE3 (Vale ON)": "VALE3.SA",
+    "ITUB4 (Itaú Unibanco PN)": "ITUB4.SA",
+    "BBDC4 (Bradesco PN)": "BBDC4.SA",
+    "BBAS3 (Banco do Brasil ON)": "BBAS3.SA",
+    "ABEV3 (Ambev ON)": "ABEV3.SA",
+    "WEGE3 (Weg ON)": "WEGE3.SA",
+    "MGLU3 (Magazine Luiza ON)": "MGLU3.SA",
+    "BOVA11 (ETF Ibovespa)": "BOVA11.SA",
+    "IVVB11 (ETF S&P 500)": "IVVB11.SA",
+    "^BVSP (Ibovespa índice)": "^BVSP",
+}
 
 # ==========================
 #       DATA CLASSES
@@ -179,7 +200,7 @@ def random_portfolios(
         if ann_vol == 0:
             sharpe = 0.0
         else:
-            sharpe = (annual_return - risk_free) / ann_vol
+            sharpe = (ann_return - risk_free) / ann_vol
 
         portfolios.append(
             PortfolioStats(
@@ -223,32 +244,61 @@ def main():
     )
 
     st.title("📈 Mini Dashboard Quantitativo em Python")
-    st.caption("Análise de ativos, simulação de portfólios e simulador de investimento.")
+    st.caption("Escolha uma lista de investimentos, período e valor, e veja qual teria sido melhor.")
 
-    col1, col2, col3 = st.columns([3, 1.5, 1.5])
+    # --------- SIDEBAR: UNIVERSO DE INVESTIMENTOS ----------
+    st.sidebar.header("🎯 Universo de investimentos")
 
-    with col1:
-        tickers_str = st.text_input(
-            "Tickers (separados por vírgula)",
-            value="PETR4.SA, VALE3.SA, ITUB4.SA",
-            help="Use o formato do Yahoo Finance (ex: PETR4.SA, VALE3.SA, ITUB4.SA, AAPL, MSFT).",
-        )
+    universe_labels = list(INVESTMENT_UNIVERSE.keys())
 
-    with col2:
-        years = st.slider(
-            "Anos de histórico",
-            min_value=1,
-            max_value=10,
-            value=3,
-        )
+    default_selection = [
+        "PETR4 (Petrobras PN)",
+        "VALE3 (Vale ON)",
+        "ITUB4 (Itaú Unibanco PN)",
+    ]
 
-    with col3:
-        risk_free = st.number_input(
-            "Taxa livre de risco (ao ano, em %)",
-            value=10.0,
-            step=0.5,
-        ) / 100.0
+    selected_labels = st.sidebar.multiselect(
+        "Selecione os ativos para analisar",
+        options=universe_labels,
+        default=[l for l in default_selection if l in universe_labels],
+        help="Você pode escolher vários (ex: 5, 10, 15 ativos) para comparar.",
+    )
 
+    extra_tickers_str = st.sidebar.text_input(
+        "Tickers adicionais (separados por vírgula, opcional)",
+        value="",
+        help="Ex: AAPL, MSFT, TSLA, BTC-USD",
+    )
+
+    years = st.sidebar.slider(
+        "Anos de histórico",
+        min_value=1,
+        max_value=10,
+        value=3,
+    )
+
+    risk_free = st.sidebar.number_input(
+        "Taxa livre de risco (ao ano, em %)",
+        value=10.0,
+        step=0.5,
+    ) / 100.0
+
+    # Monta lista final de tickers (universo + extras)
+    selected_tickers = [INVESTMENT_UNIVERSE[label] for label in selected_labels]
+
+    extra_tickers = [
+        t.strip()
+        for t in extra_tickers_str.split(",")
+        if t.strip()
+    ]
+
+    tickers = selected_tickers + extra_tickers
+
+    if len(tickers) == 0:
+        st.warning("Selecione pelo menos 1 ativo na barra lateral ou informe tickers extras.")
+        return
+
+    # --------- MODO DE ANÁLISE ----------
     analysis_type = st.radio(
         "Tipo de análise",
         options=[
@@ -258,11 +308,6 @@ def main():
         ],
         horizontal=True,
     )
-
-    tickers = [t.strip() for t in tickers_str.split(",") if t.strip()]
-    if len(tickers) == 0:
-        st.warning("Informe pelo menos um ticker para começar.")
-        return
 
     # ============= ESTATÍSTICAS POR ATIVO =============
     if analysis_type == "Estatísticas por ativo":
@@ -383,7 +428,7 @@ def main():
                 st.error(f"Erro ao simular investimento: {e}")
                 return
 
-            st.subheader("📊 Ranking de rentabilidade (com base no período escolhido)")
+            st.subheader("📊 Ranking de rentabilidade (período escolhido)")
             st.dataframe(
                 simulation.style.format({
                     "Retorno (%)": "{:.2f}",
