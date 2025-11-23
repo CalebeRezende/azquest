@@ -24,10 +24,12 @@ except ModuleNotFoundError:
 TRADING_DAYS = 252
 
 # ======================================================
-#  UNIVERSO DE INVESTIMENTOS PRÉ-DEFINIDOS (B3/ETFs)
+#  UNIVERSO DE INVESTIMENTOS PRÉ-DEFINIDOS
+#  (inclui B3 + EUA, default em EUA p/ evitar erro na nuvem)
 # ======================================================
 
 INVESTMENT_UNIVERSE: Dict[str, str] = {
+    # B3
     "PETR4 (Petrobras PN)": "PETR4.SA",
     "VALE3 (Vale ON)": "VALE3.SA",
     "ITUB4 (Itaú Unibanco PN)": "ITUB4.SA",
@@ -37,9 +39,20 @@ INVESTMENT_UNIVERSE: Dict[str, str] = {
     "WEGE3 (Weg ON)": "WEGE3.SA",
     "MGLU3 (Magazine Luiza ON)": "MGLU3.SA",
     "BOVA11 (ETF Ibovespa)": "BOVA11.SA",
-    "IVVB11 (ETF S&P 500)": "IVVB11.SA",
+    "IVVB11 (ETF S&P 500 B3)": "IVVB11.SA",
     "^BVSP (Ibovespa índice)": "^BVSP",
+    # EUA
+    "AAPL (Apple)": "AAPL",
+    "MSFT (Microsoft)": "MSFT",
+    "AMZN (Amazon)": "AMZN",
+    "GOOG (Alphabet)": "GOOG",
+    "META (Meta)": "META",
+    "NVDA (NVIDIA)": "NVDA",
+    "TSLA (Tesla)": "TSLA",
+    "SPY (ETF S&P 500)": "SPY",
+    "QQQ (ETF Nasdaq 100)": "QQQ",
 }
+
 
 # ==========================
 #       DATA CLASSES
@@ -66,58 +79,118 @@ class PortfolioStats:
 #   FUNÇÕES FINANCEIRAS
 # ==========================
 
-def download_prices(tickers: List[str], years: int = 3) -> pd.DataFrame:
+def _extract_adj_close_for_single_ticker(
+    data: pd.DataFrame | pd.Series,
+    ticker: str,
+) -> pd.Series | None:
     """
-    Baixa preços 'Adj Close' via yfinance para 1 ou vários tickers,
-    tratando Series, DataFrame simples e MultiIndex.
+    Extrai a série de 'Adj Close' para UM ticker, independente do formato
+    que o yfinance devolveu (Series, DataFrame simples ou MultiIndex).
+    Retorna None se não conseguir extrair.
     """
-    end = datetime.today()
-    start = end - timedelta(days=365 * years)
-
-    data = yf.download(
-        tickers,
-        start=start,
-        end=end,
-        auto_adjust=False,
-        progress=False,
-    )
-
     if data is None or len(data) == 0:
-        raise ValueError("Nenhum dado retornado pelo Yahoo Finance.")
+        return None
 
-    # Caso Series (situação mais rara)
+    # Series
     if isinstance(data, pd.Series):
         if "Adj Close" in data:
-            df = data["Adj Close"].to_frame()
+            s = data["Adj Close"]
         else:
-            raise ValueError(f"Nenhum 'Adj Close' retornado para {tickers}.")
+            return None
+
+    # DataFrame
     else:
         cols = data.columns
-
-        # MultiIndex (mais comum com vários tickers)
+        # MultiIndex (ex: ('Adj Close','PETR4.SA'))
         if isinstance(cols, pd.MultiIndex):
             level0 = cols.get_level_values(0)
             level1 = cols.get_level_values(1)
 
             if "Adj Close" in level0:
-                df = data["Adj Close"]
+                # pega nível "Adj Close" no primeiro nível
+                s = data["Adj Close"]
+                if isinstance(s, pd.DataFrame):
+                    # se tiver mais de uma coluna, tenta achar este ticker
+                    if ticker in s.columns:
+                        s = s[ticker]
+                    else:
+                        # pega a primeira coluna, pelo menos
+                        s = s.iloc[:, 0]
             elif "Adj Close" in level1:
-                df = data.xs("Adj Close", axis=1, level=1)
+                # pega por nível=1
+                s = data.xs("Adj Close", axis=1, level=1)
+                if isinstance(s, pd.DataFrame):
+                    if ticker in s.columns:
+                        s = s[ticker]
+                    else:
+                        s = s.iloc[:, 0]
             else:
-                raise ValueError("MultiIndex sem nível 'Adj Close'.")
+                return None
         else:
-            # DataFrame simples (1 ticker só)
+            # DataFrame simples, sem MultiIndex
             if "Adj Close" in cols:
-                df = data["Adj Close"].to_frame()
+                s = data["Adj Close"]
             else:
-                raise ValueError("DataFrame sem coluna 'Adj Close'.")
+                return None
 
-    if isinstance(df, pd.Series):
-        df = df.to_frame()
+    if isinstance(s, pd.DataFrame):
+        # se por alguma razão sobrou DataFrame, pega a primeira col
+        s = s.iloc[:, 0]
 
+    s = s.dropna()
+    if s.empty:
+        return None
+
+    return s
+
+
+def download_prices(tickers: List[str], years: int = 3) -> pd.DataFrame:
+    """
+    Baixa preços 'Adj Close' via yfinance para 1 ou vários tickers.
+    Baixa CADA TICKER separadamente para:
+    - evitar erros globais quando um deles falha
+    - conseguir ignorar ativos individuais com problema.
+    """
+    end = datetime.today()
+    start = end - timedelta(days=365 * years)
+
+    series_map: Dict[str, pd.Series] = {}
+    failed: List[str] = []
+
+    for t in tickers:
+        try:
+            data = yf.download(
+                t,
+                start=start,
+                end=end,
+                auto_adjust=False,
+                progress=False,
+            )
+        except Exception as e:
+            failed.append(t)
+            continue
+
+        s = _extract_adj_close_for_single_ticker(data, t)
+        if s is None or s.empty:
+            failed.append(t)
+            continue
+
+        series_map[t] = s
+
+    if failed:
+        st.warning(
+            f"Não foi possível obter dados para: {', '.join(failed)}. "
+            "Esses ativos serão ignorados na análise."
+        )
+
+    if not series_map:
+        raise ValueError("Nenhum dado válido encontrado para os tickers informados.")
+
+    # Alinha todas as séries pelo índice de datas
+    df = pd.DataFrame(series_map)
     df = df.dropna(how="all")
     if df.empty:
-        raise ValueError("Nenhum dado válido após limpeza.")
+        raise ValueError("Nenhum dado válido após alinhamento e limpeza.")
 
     return df
 
@@ -251,10 +324,11 @@ def main():
 
     universe_labels = list(INVESTMENT_UNIVERSE.keys())
 
+    # Default em EUA para evitar problema de B3 em alguns ambientes
     default_selection = [
-        "PETR4 (Petrobras PN)",
-        "VALE3 (Vale ON)",
-        "ITUB4 (Itaú Unibanco PN)",
+        "AAPL (Apple)",
+        "MSFT (Microsoft)",
+        "SPY (ETF S&P 500)",
     ]
 
     selected_labels = st.sidebar.multiselect(
@@ -267,7 +341,7 @@ def main():
     extra_tickers_str = st.sidebar.text_input(
         "Tickers adicionais (separados por vírgula, opcional)",
         value="",
-        help="Ex: AAPL, MSFT, TSLA, BTC-USD",
+        help="Ex: PETR4.SA, VALE3.SA, AAPL, MSFT, TSLA",
     )
 
     years = st.sidebar.slider(
@@ -283,7 +357,6 @@ def main():
         step=0.5,
     ) / 100.0
 
-    # Monta lista final de tickers (universo + extras)
     selected_tickers = [INVESTMENT_UNIVERSE[label] for label in selected_labels]
 
     extra_tickers = [
